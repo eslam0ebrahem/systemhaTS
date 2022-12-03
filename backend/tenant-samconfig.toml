@@ -1,0 +1,13 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "stack-pooled"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1ta604u94w0fs"
+s3_prefix = "stack-pooled"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+disable_rollback = true
+confirm_changeset = true
+parameter_overrides = "StageName=\"prod\""
+image_repositories = []

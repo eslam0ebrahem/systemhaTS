@@ -1,0 +1,776 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Template to deploy lambda functions as part of bootstrap
+Parameters:
+  ServerlessSaaSSettingsTableArn:
+    Type: String
+  TenantStackMappingTableArn:
+    Type: String
+  TenantStackMappingTableName:
+    Type: String
+  CognitoOperationUsersUserPoolId:
+    Type: String
+  CognitoOperationUsersUserPoolClientId:
+    Type: String
+  CognitoUserPoolId:
+    Type: String
+  CognitoUserPoolClientId:
+    Type: String
+  TenantUserPoolCallbackURLParameter:
+    Type: String
+  ApiKeyOperationUsersParameter:
+    Type: String
+  ApiKeyPlatinumTierParameter:
+    Type: String
+  ApiKeyPremiumTierParameter:
+    Type: String
+  ApiKeyStandardTierParameter:
+    Type: String
+  ApiKeyBasicTierParameter:
+    Type: String
+  LambdaCanaryDeploymentPreference:
+    Type: String
+    Default: "False"
+Resources:
+  ServerlessSaaSLayers:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: serverless-saas-dependencies
+      Description: Utilities for project.
+      ContentUri: ../layers/
+      CompatibleRuntimes:
+        - nodejs16.x
+
+  #Tenant Registration
+  RegisterTenantLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub tenant-registration-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+
+  RegisterTenantFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: RegisterTenantLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: tenantRegistration.registerTenant
+      Runtime: nodejs16.x
+      Role: !GetAtt RegisterTenantLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables: # Need to find a better way than hard coding resource paths
+          CREATE_TENANT_ADMIN_USER_RESOURCE_PATH: "/user/tenant-admin"
+          CREATE_TENANT_RESOURCE_PATH: "/tenant"
+          PROVISION_TENANT_RESOURCE_PATH: "/provisioning"
+          PLATINUM_TIER_API_KEY: !Ref ApiKeyPlatinumTierParameter
+          PREMIUM_TIER_API_KEY: !Ref ApiKeyPremiumTierParameter
+          STANDARD_TIER_API_KEY: !Ref ApiKeyStandardTierParameter
+          BASIC_TIER_API_KEY: !Ref ApiKeyBasicTierParameter
+          POWERTOOLS_SERVICE_NAME: "TenantRegistration.RegisterTenant"
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: !Ref LambdaCanaryDeploymentPreference
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref RegisterTenantFunctionCanaryErrorsAlarm
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "uuid"
+          - "axios"
+          - "@aws-sdk/signature-v4"
+          - "@aws-crypto/sha256-js"
+  RegisterTenantFunctionCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${RegisterTenantFunction}:live"
+        - Name: FunctionName
+          Value: !Ref RegisterTenantFunction
+        - Name: ExecutedVersion
+          Value: !GetAtt RegisterTenantFunction.Version.Version
+
+  CreateUserLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub create-user-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRoute53FullAccess
+        - arn:aws:iam::aws:policy/CloudFrontFullAccess
+      Policies:
+        - PolicyName: !Sub create-user-lambda-execution-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:*
+                Resource: "*"
+
+  SignInTenantLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub signIn-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: !Sub signIn-lambda-execution-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:*
+                Resource: "*"
+
+  #User management
+  CreateUserFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: CreateUserLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: userManagement.create_user
+      Runtime: nodejs16.x
+      Role: !GetAtt CreateUserLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: "UserManagement.CreateUser"
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: !Ref LambdaCanaryDeploymentPreference
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref CreateUserFunctionCanaryErrorsAlarm
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/client-cognito-identity-provider"
+          - "@aws-sdk/client-route-53"
+          - "@aws-sdk/client-cloudfront"
+  CreateUserFunctionCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${CreateUserFunction}:live"
+        - Name: FunctionName
+          Value: !Ref CreateUserFunction
+        - Name: ExecutedVersion
+          Value: !GetAtt CreateUserFunction.Version.Version
+  SignInTenantFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: SignInTenantLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: auth.signIn
+      Runtime: nodejs16.x
+      Role: !GetAtt SignInTenantLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: !Ref LambdaCanaryDeploymentPreference
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref SignInTenantFunctionCanaryErrorsAlarm
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/client-cognito-identity-provider"
+          - "aws-jwt-verify"
+
+  SignInTenantFunctionCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${SignInTenantFunction}:live"
+        - Name: FunctionName
+          Value: !Ref SignInTenantFunction
+        - Name: ExecutedVersion
+          Value: !GetAtt SignInTenantFunction.Version.Version
+
+  CreateTenantAdminUserFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: CreateUserLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: userManagement.create_tenant_admin_user
+      Runtime: nodejs16.x
+      Role: !GetAtt CreateUserLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          TENANT_USER_POOL_ID: !Ref CognitoUserPoolId
+          TENANT_APP_CLIENT_ID: !Ref CognitoUserPoolClientId
+          TENANT_USER_POOL_CALLBACK_URL:
+            !Join [
+              "",
+              ["https://", !Ref TenantUserPoolCallbackURLParameter, "/"],
+            ]
+          POWERTOOLS_SERVICE_NAME: "UserManagement.CreateTenantAdmin"
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: !Ref LambdaCanaryDeploymentPreference
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref CreateTenantAdminUserFunctionCanaryErrorsAlarm
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/client-cognito-identity-provider"
+          - "@aws-sdk/client-route-53"
+          - "@aws-sdk/client-cloudfront"
+  CreateTenantAdminUserFunctionCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${CreateTenantAdminUserFunction}:live"
+        - Name: FunctionName
+          Value: !Ref CreateTenantAdminUserFunction
+        - Name: ExecutedVersion
+          Value: !GetAtt CreateTenantAdminUserFunction.Version.Version
+
+  SharedServicesAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: AuthorizerExecutionRole
+    Properties:
+      CodeUri: ../Resources/
+      Handler: shared_service_authorizer.lambda_handler
+      Runtime: nodejs16.x
+      Role: !GetAtt AuthorizerExecutionRole.Arn
+      MemorySize: 256
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          OPERATION_USERS_USER_POOL: !Ref CognitoOperationUsersUserPoolId
+          OPERATION_USERS_APP_CLIENT: !Ref CognitoOperationUsersUserPoolClientId
+          OPERATION_USERS_API_KEY: !Ref ApiKeyOperationUsersParameter
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+  AuthorizerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: authorizer-execution-role
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: authorizer-execution-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:List*
+                Resource:
+                  - !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+  AuthorizerAccessRole:
+    Type: AWS::IAM::Role
+    DependsOn: AuthorizerExecutionRole
+    Properties:
+      RoleName: authorizer-access-role
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt "AuthorizerExecutionRole.Arn"
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: authorizer-access-role-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchGetItem
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*
+
+  BusinessServicesAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: AuthorizerAccessRole
+    Properties:
+      CodeUri: ../Resources/
+      Handler: tenant_authorizer.lambda_handler
+      Runtime: nodejs16.x
+      Role: !GetAtt AuthorizerExecutionRole.Arn
+      MemorySize: 256
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          OPERATION_USERS_USER_POOL: !Ref CognitoOperationUsersUserPoolId
+          OPERATION_USERS_APP_CLIENT: !Ref CognitoOperationUsersUserPoolClientId
+          OPERATION_USERS_API_KEY: !Ref ApiKeyOperationUsersParameter
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "cognito-express"
+  #Tenant Management
+  TenantManagementLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub tenant-management-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: !Sub create-tenant-execution-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - !Ref ServerlessSaaSSettingsTableArn
+  CreateTenantFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: TenantManagementLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: tenantManagement.create_tenant
+      Runtime: nodejs16.x
+      Role: !GetAtt TenantManagementLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          POWERTOOLS_SERVICE_NAME: "TenantManagement.CreateTenant"
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: !Ref LambdaCanaryDeploymentPreference
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref CreateTenantFunctionCanaryErrorsAlarm
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+  ConfirmTenantFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: TenantManagementLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: confirmSignUp.confirmSignUp
+      Runtime: nodejs16.x
+      Role: !GetAtt TenantManagementLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          TENANT_USER_POOL_ID: !Ref CognitoUserPoolId
+          TENANT_APP_CLIENT_ID: !Ref CognitoUserPoolClientId
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: !Ref LambdaCanaryDeploymentPreference
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref CreateTenantFunctionCanaryErrorsAlarm
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/client-cognito-identity-provider"
+  ConfirmTenantFunctionCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${ConfirmTenantFunction}:live"
+        - Name: FunctionName
+          Value: !Ref ConfirmTenantFunction
+        - Name: ExecutedVersion
+          Value: !GetAtt ConfirmTenantFunction.Version.Version
+  CreateTenantFunctionCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value: !Sub "${CreateTenantFunction}:live"
+        - Name: FunctionName
+          Value: !Ref CreateTenantFunction
+        - Name: ExecutedVersion
+          Value: !GetAtt CreateTenantFunction.Version.Version
+  # #Tenant Provisioning
+  ProvisionTenantLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub tenant-provisioning-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: !Sub tenant-provisioning-lambda-execution-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !Ref TenantStackMappingTableArn
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource:
+                  - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:serverless-saas-pipeline
+              - Effect: Allow
+                Action:
+                  - cloudformation:DeleteStack
+                Resource: "*"
+  ProvisionTenantFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: ProvisionTenantLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: tenant-provisioning.provision_tenant
+      Runtime: nodejs16.x
+      Role: !GetAtt ProvisionTenantLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          TENANT_STACK_MAPPING_TABLE_NAME: !Ref TenantStackMappingTableName
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/client-codepipeline"
+          - "@aws-sdk/client-dynamodb"
+          - "@aws-sdk/lib-dynamodb"
+  DeProvisionTenantLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub tenant-deprovisioning-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: !Sub tenant-deprovisioning-lambda-execution-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            #Since this lambda is invoking cloudformation which is inturn removing AWS resources, we are giving overly permissive permissions to this lambda.
+            #You can limit this based upon your use case and AWS Resources you need to remove.
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+  DeProvisionTenantFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: DeProvisionTenantLambdaExecutionRole
+    Properties:
+      CodeUri: ../TenantManagementService/
+      Handler: tenant-provisioning.deprovision_tenant
+      Runtime: nodejs16.x
+      Role: !GetAtt DeProvisionTenantLambdaExecutionRole.Arn
+      Tracing: Active
+      Layers:
+        - !Ref ServerlessSaaSLayers
+      Environment:
+        Variables:
+          TENANT_STACK_MAPPING_TABLE_NAME: !Ref TenantStackMappingTableName
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        External:
+          - "@aws-sdk/client-codepipeline"
+          - "@aws-sdk/client-dynamodb"
+          - "@aws-sdk/lib-dynamodb"
+  UpdateSettingsTableLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub update-settingstable-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: !Sub update-settingstable-lambda-execution-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !Ref ServerlessSaaSSettingsTableArn
+  UpdateSettingsTableFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: UpdateSettingsTableLambdaExecutionRole
+    Properties:
+      CodeUri: ../custom_resources/
+      Handler: update_settings_table.handler
+      Runtime: nodejs16.x
+      Role: !GetAtt UpdateSettingsTableLambdaExecutionRole.Arn
+      Layers:
+        - !Ref ServerlessSaaSLayers
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+  UpdateTenantStackMapTableLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub update-tenantstackmap-lambda-execution-role-${AWS::Region}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: !Sub update-tenantstackmap-lambda-execution-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !Ref TenantStackMappingTableArn
+  UpdateTenantStackMapTableFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: UpdateTenantStackMapTableLambdaExecutionRole
+    Properties:
+      CodeUri: ../custom_resources/
+      Handler: update_tenantstackmap_table.handler
+      Runtime: nodejs16.x
+      Role: !GetAtt UpdateTenantStackMapTableLambdaExecutionRole.Arn
+      Layers:
+        - !Ref ServerlessSaaSLayers
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+Outputs:
+  RegisterTenantLambdaExecutionRoleArn:
+    Value: !GetAtt RegisterTenantLambdaExecutionRole.Arn
+  SignInTenantLambdaExecutionRoleArn:
+    Value: !GetAtt SignInTenantLambdaExecutionRole.Arn
+  TenantManagementLambdaExecutionRoleArn:
+    Value: !GetAtt TenantManagementLambdaExecutionRole.Arn
+  RegisterTenantFunctionArn:
+    Value: !GetAtt RegisterTenantFunction.Arn
+  SharedServicesAuthorizerFunctionArn:
+    Value: !GetAtt SharedServicesAuthorizerFunction.Arn
+  CreateTenantAdminUserFunctionArn:
+    Value: !GetAtt CreateTenantAdminUserFunction.Arn
+  UpdateSettingsTableFunctionArn:
+    Value: !GetAtt UpdateSettingsTableFunction.Arn
+  UpdateTenantStackMapTableFunctionArn:
+    Value: !GetAtt UpdateTenantStackMapTableFunction.Arn
+  ProvisionTenantFunctionArn:
+    Value: !GetAtt ProvisionTenantFunction.Arn
+  DeProvisionTenantFunctionArn:
+    Value: !GetAtt DeProvisionTenantFunction.Arn
+  CreateTenantFunctionArn:
+    Value: !GetAtt CreateTenantFunction.Arn
+  ConfirmTenantFunctionArn:
+    Value: !GetAtt ConfirmTenantFunction.Arn
+  SignInTenantFunctionArn:
+    Value: !GetAtt SignInTenantFunction.Arn
+  BusinessServicesAuthorizerFunctionArn:
+    Value: !GetAtt BusinessServicesAuthorizerFunction.Arn
